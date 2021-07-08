@@ -21,6 +21,7 @@ from tqdm import tqdm
 from sklearn import metrics
 from torch.optim.lr_scheduler import MultiStepLR
 
+
 def encode_inputs(x):
     '''
     Encodes the inpput because of categorical values
@@ -31,6 +32,7 @@ def encode_inputs(x):
     oe.fit(x)
     x_enc = oe.transform(x)
     return x_enc
+
 
 def scale_inputs(x_train, x_test):
     scaler = StandardScaler()
@@ -53,6 +55,7 @@ df = pd.read_csv("/home/baha/codes/lemonsData/data_lemons.csv")
 df = df.dropna()
 x = df.drop('IsBadBuy', axis=1).values
 y = df['IsBadBuy'].values
+count = df['IsBadBuy'].value_counts()
 
 x_encoded = encode_inputs(x)
 x_train, x_test, y_train, y_test = train_test_split(x_encoded, y, test_size=0.2, random_state=20)
@@ -64,20 +67,20 @@ x_train, x_test = scale_inputs(x_train, x_test)
 
 
 # defining model hyperparameters
-EPOCHS = 50
+EPOCHS = 100
 BATCH_SIZE = 64
-LEARNING_RATE = 0.01
-train_label = df['IsBadBuy'][:len(y_train)]
-train_label_ids = torch.tensor([label for label in train_label], dtype=torch.long)
+LEARNING_RATE = 0.001
+# train_label = df['IsBadBuy'][:len(y_train)]
+train_label_ids = torch.tensor([label for label in y_train], dtype=torch.long)
 labels = TensorDataset(train_label_ids)
 
 #class weighting
-labels_unique, counts = np.unique(train_label, return_counts=True)
+labels_unique, counts = np.unique(y_train, return_counts=True)
 print("Unique labels : {}".format(labels_unique))
 class_weights = [sum(counts) / c for c in counts] #(#{class_0}, #(class_1}]
-weights = [class_weights[e] for e in train_label]
+weights = [class_weights[e]/np.sum(class_weights) for e in y_train]
 weights = torch.DoubleTensor(weights)
-sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(train_label))
+sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(y_train))
 
 train_data = TrainData(torch.FloatTensor(x_train), torch.FloatTensor(y_train))
 test_data = TestData(torch.FloatTensor(x_test), torch.FloatTensor(y_test))
@@ -93,7 +96,7 @@ print(model)
 
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-scheduler = MultiStepLR(optimizer, milestones=[20, 40], gamma=0.1)
+scheduler = MultiStepLR(optimizer, milestones=[20, 40, 60, 80], gamma=0.1)
 model.train()
 
 for e in range(1, EPOCHS + 1):
@@ -110,10 +113,10 @@ for e in range(1, EPOCHS + 1):
 
         loss.backward()
         optimizer.step()
-        scheduler.step()
 
         epoch_loss += loss.item()
         epoch_acc += acc.item()
+    scheduler.step()
 
     print(f'Epoch {e + 0:03}: | Loss: {epoch_loss / len(train_loader):.5f} | Acc: {epoch_acc / len(train_loader):.3f}')
 

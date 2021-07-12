@@ -20,6 +20,7 @@ from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from sklearn import metrics
 from torch.optim.lr_scheduler import MultiStepLR
+from tqdm.notebook import tqdm
 
 
 def encode_inputs(x):
@@ -34,14 +35,14 @@ def encode_inputs(x):
     return x_enc
 
 
-def scale_inputs(x_train, x_test):
+def scale_inputs(x_train, x_val):
     scaler = StandardScaler()
     x_train = scaler.fit_transform(x_train)
-    x_test = scaler.transform(x_test)
-    return x_train, x_test
+    x_val = scaler.transform(x_val)
+    return x_train, x_val
 
 
-def binary_acc(y_pred, y_test):
+def bin_acc(y_pred, y_test):
     y_pred_tag = torch.round(torch.sigmoid(y_pred))
 
     correct_results_sum = (y_pred_tag == y_test).sum().float()
@@ -56,19 +57,22 @@ df = df.dropna()
 x = df.drop('IsBadBuy', axis=1).values
 y = df['IsBadBuy'].values
 count = df['IsBadBuy'].value_counts()
+sns.countplot(x='IsBadBuy', data=df)
+plt.show()
+
 
 x_encoded = encode_inputs(x)
-x_train, x_test, y_train, y_test = train_test_split(x_encoded, y, test_size=0.2, random_state=20)
+x_train, x_val, y_train, y_val = train_test_split(x_encoded, y, test_size=0.2, random_state=20)
 print('Train', x_train.shape, y_train.shape)
-print('Test', x_test.shape, y_test.shape)
+print('Test', x_val.shape, y_val.shape)
 
 #
-x_train, x_test = scale_inputs(x_train, x_test)
+x_train, x_val = scale_inputs(x_train, x_val)
 
 
 # defining model hyperparameters
 EPOCHS = 100
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 LEARNING_RATE = 0.001
 # train_label = df['IsBadBuy'][:len(y_train)]
 train_label_ids = torch.tensor([label for label in y_train], dtype=torch.long)
@@ -83,9 +87,9 @@ weights = torch.DoubleTensor(weights)
 sampler = torch.utils.data.sampler.WeightedRandomSampler(weights, len(y_train))
 
 train_data = TrainData(torch.FloatTensor(x_train), torch.FloatTensor(y_train))
-test_data = TestData(torch.FloatTensor(x_test), torch.FloatTensor(y_test))
+val_data = TestData(torch.FloatTensor(x_val), torch.FloatTensor(y_val))
 train_loader = DataLoader(dataset=train_data, sampler=sampler, batch_size=BATCH_SIZE)
-test_loader = DataLoader(dataset=test_data, batch_size=BATCH_SIZE)
+val_loader = DataLoader(dataset=val_data, batch_size=BATCH_SIZE)
 
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -99,44 +103,78 @@ optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 scheduler = MultiStepLR(optimizer, milestones=[20, 40, 60, 80], gamma=0.1)
 model.train()
 
-for e in range(1, EPOCHS + 1):
-    epoch_loss = 0
-    epoch_acc = 0
-    for X_batch, y_batch in train_loader:
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+accuracy_stats = {
+    'train': [],
+    "val": []
+}
+loss_stats = {
+    'train': [],
+    "val": []
+}
+
+print("Begin training.")
+
+for e in tqdm(range(1, EPOCHS + 1)):
+    # TRAINING
+    train_epoch_loss = 0
+    train_epoch_acc = 0
+
+    model.train()
+    for X_train_batch, y_train_batch in train_loader:
+        X_train_batch, y_train_batch = X_train_batch.to(device), y_train_batch.to(device)
         optimizer.zero_grad()
 
-        y_pred = model(X_batch)
+        y_train_pred = model(X_train_batch)
 
-        loss = criterion(y_pred, y_batch.unsqueeze(1))
-        acc = binary_accuracy(y_pred, y_batch.unsqueeze(1))
+        train_loss = criterion(y_train_pred, y_train_batch.unsqueeze(1))
+        train_acc = bin_acc(y_train_pred, y_train_batch.unsqueeze(1))
 
-        loss.backward()
+        train_loss.backward()
         optimizer.step()
 
-        epoch_loss += loss.item()
-        epoch_acc += acc.item()
-    scheduler.step()
+        train_epoch_loss += train_loss.item()
+        train_epoch_acc += train_acc.item()
 
-    print(f'Epoch {e + 0:03}: | Loss: {epoch_loss / len(train_loader):.5f} | Acc: {epoch_acc / len(train_loader):.3f}')
+    # VALIDATION
+    with torch.no_grad():
 
-model.eval()
-all_predictions = torch.LongTensor()
-all_hard_predictions = torch.FloatTensor()
-all_labels = torch.LongTensor()
-with torch.no_grad():
-    for x_batch, y_batch in test_loader:
-        x_batch, y_batch = x_batch.to(device), y_batch.to(device)
-        y_test_pred = model(x_batch)
-        y_test_pred = torch.sigmoid(y_test_pred)
-        y_pred_tag = torch.round(y_test_pred)
-        all_hard_predictions = torch.cat([all_hard_predictions, y_pred_tag], dim=0)
-        all_predictions = torch.cat([all_predictions, y_test_pred], dim=0)
-        all_labels = torch.cat([all_labels, y_batch], dim=0)
+        val_epoch_loss = 0
+        val_epoch_acc = 0
+
+        model.eval()
+        all_predictions = torch.LongTensor()
+        all_hard_predictions = torch.FloatTensor()
+        all_labels = torch.LongTensor()
+        for X_val_batch, y_val_batch in val_loader:
+            X_val_batch, y_val_batch = X_val_batch.to(device), y_val_batch.to(device)
+            y_val_pred = model(X_val_batch)
+
+            val_loss = criterion(y_val_pred, y_val_batch.unsqueeze(1))
+            val_acc = bin_acc(y_val_pred, y_val_batch.unsqueeze(1))
+
+            val_epoch_loss += val_loss.item()
+            val_epoch_acc += val_acc.item()
+
+            loss_stats['train'].append(train_epoch_loss / len(train_loader))
+            loss_stats['val'].append(val_epoch_loss / len(val_loader))
+            accuracy_stats['train'].append(train_epoch_acc / len(train_loader))
+            accuracy_stats['val'].append(val_epoch_acc / len(val_loader))
+
+            y_val_pred_auc = torch.sigmoid(y_val_pred)
+            y_pred_tag = torch.round(y_val_pred_auc)
+            all_hard_predictions = torch.cat([all_hard_predictions, y_pred_tag], dim=0)
+            all_predictions = torch.cat([all_predictions, y_val_pred_auc], dim=0)
+            all_labels = torch.cat([all_labels, y_val_batch], dim=0)
+
+    print(f'Epoch {e + 0:03}: | Train Loss: '
+          f'{train_epoch_loss / len(train_loader):.5f} | Val Loss: '
+          f'{val_epoch_loss / len(val_loader):.5f} | Train Acc: '
+          f'{train_epoch_acc / len(train_loader):.3f}| Val Acc: '
+          f'{val_epoch_acc / len(val_loader):.3f}')
+
 
 confusion_matrix(all_labels, all_hard_predictions)
 fpr, tpr, thresholds = metrics.roc_curve(all_labels, all_predictions, pos_label=1)
-# ap = metrics.average_precision_score(all_labels, all_predictions)
 AUC = metrics.auc(fpr, tpr)
 print(classification_report(all_labels, all_hard_predictions))
 print("AUC on test set", AUC)
